@@ -1,58 +1,53 @@
 <p align="center">
-  <img src="assets/logo.svg" width="120" alt="Bandwick logo — hand-drawn figure mark">
+  <img src="assets/logo-title.svg" width="420" alt="BandWick">
 </p>
 
-# Bandwick
+<p align="center">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT License"></a>
+  <img src="https://img.shields.io/badge/status-early%20development-yellow.svg" alt="Status: early development">
+</p>
 
-Self-hosted network monitor + per-device bandwidth control, run from your
-own machine — no router firmware or dedicated hardware required.
+BandWick is a self-hosted network monitor and bandwidth controller that runs from your own computer. There's no router firmware to flash and no extra hardware to buy. It watches what's happening on your network and lets you decide how much bandwidth each device gets.
 
-The name plays on "wick" — the thing that controls how a flame draws
-fuel — for a tool that controls how much of the connection each device
-draws.
+The name comes from wick, the part of a candle that controls how much fuel a flame draws. BandWick does the same job for your connection: it controls how much of it each device gets to use.
 
 ## How it works
 
-Runs a small local backend with elevated network privileges (same
-privilege level as Wireshark) that:
+BandWick runs a small local backend with the same network privileges as a tool like Wireshark. That backend:
 
-1. Discovers devices on your LAN via ARP scanning
-2. Routes their traffic through your machine (ARP spoofing) to observe
-   and, next, throttle it
-3. Serves a local HTML dashboard for live usage graphs and per-device
-   bandwidth caps
+1. Discovers devices on your LAN through ARP scanning.
+2. Routes each device's traffic through your machine using ARP spoofing, so it can be observed and, eventually, throttled.
+3. Serves a local web dashboard with live usage graphs and per-device bandwidth controls.
 
-**Only ever point this at a network you own or administer.** Doing the
-same thing on a network you don't control (school, office, café Wi-Fi)
-is packet interception and is illegal in most places.
+**Only run this against a network you own or administer.** The technique used here is the same one real man-in-the-middle attacks rely on. Running it against a network you don't control, like a school, an office, or a coffee shop, counts as packet interception and is illegal in most places. The only thing that makes it legitimate here is that it's your own network.
 
 ## Status
 
 - [x] Device discovery (`backend/discovery.py`)
-- [x] ARP spoofing / traffic interception (`backend/spoof.py`)
-- [ ] Bandwidth shaping (per-OS)
+- [x] ARP spoofing and traffic interception (`backend/spoof.py`)
+- [ ] Bandwidth shaping (per OS)
 - [ ] Web dashboard
 - [ ] Native window wrapper (pywebview)
 
-## Setup
+## Getting started
 
 ```bash
 cd backend
 pip install -r requirements.txt
 ```
 
-### Run device discovery
+### Device discovery
 
 ```bash
 # Linux / macOS
 sudo python3 discovery.py
 
 # Windows (requires Npcap: https://npcap.com/#download)
-# Run PowerShell/cmd as Administrator, then:
+# Run PowerShell or cmd as Administrator, then:
 python discovery.py
 ```
 
-Outputs JSON, one entry per device found:
+This prints JSON, one entry per device found:
 
 ```json
 [
@@ -65,32 +60,36 @@ Outputs JSON, one entry per device found:
 ]
 ```
 
-`vendor` and `hostname` may be `null` if the lookup fails (private MAC
-randomization on modern phones, no reverse DNS entry, etc.) — this is
-expected and not a bug.
+`vendor` and `hostname` can come back `null` if the lookup fails. This happens often with MAC randomization on modern phones or devices with no reverse DNS entry, and it isn't a bug.
 
-### Run ARP spoofing / interception
+### ARP spoofing and interception
 
-Find your gateway IP first (`ip route` on Linux, `route -n get default`
-on macOS, `ipconfig` on Windows) and a target device's IP from the
-discovery output above, then:
+Find your gateway IP first (`ip route` on Linux, `route -n get default` on macOS, `ipconfig` on Windows), then pick a target IP from the discovery output above.
 
 ```bash
 # Linux / macOS
 sudo python3 spoof.py <target_ip> <gateway_ip>
 
-# Windows (requires Npcap, and run as Administrator)
-# Also run this first, once, as Administrator:
+# Windows (requires Npcap, run as Administrator)
+# Run this once first, as Administrator:
 #   netsh interface ipv4 set global forwarding=enabled
 python spoof.py <target_ip> <gateway_ip>
 ```
 
-This routes the target device's traffic through your machine so it can
-be observed (and, once shaping lands, throttled). Press `Ctrl+C` to stop
-— both devices' ARP tables are automatically restored to their real
-mappings on exit, whether that's a clean stop, an error, or Ctrl+C.
+This routes the target device's traffic through your machine so it can be observed, and later throttled once shaping is in place. Press Ctrl+C to stop. Both devices' ARP tables are restored to their real mappings automatically, whether that happens through a clean stop, an error, or Ctrl+C.
 
-**Only run this against a device on your own network.** See the warning
-above — this is the same technique real MITM attacks use; the only
-thing that makes it legitimate here is that it's your network.
+The same warning from above applies here: only run this against a device on your own network.
 
+## Roadmap
+
+- Bandwidth shaping per operating system, starting with Linux via `tc`
+- A local web dashboard for live monitoring and per-device limits
+- A native window wrapper using pywebview, so the dashboard runs without a browser
+
+## Contributing
+
+This project is in early, active development. Issues and pull requests are welcome, but expect things to move and change quickly for now.
+
+## License
+
+BandWick is released under the MIT License. See [LICENSE](LICENSE) for details.
