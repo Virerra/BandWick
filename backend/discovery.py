@@ -9,20 +9,27 @@ Requires root/admin privileges to send raw ARP frames:
   - Linux/Mac:  sudo python3 discovery.py
   - Windows:    run as Administrator, with Npcap installed
                 (https://npcap.com/#download)
+
+On machines with more than one network adapter (VPN clients, Hyper-V
+switches, virtual bridges, and similar), scapy's default interface
+guess isn't always the one actually connected to your LAN. This module
+resolves the interface the same way the OS would for a normal internet
+connection, and sends the ARP broadcast explicitly on that interface,
+rather than leaving it to scapy's default.
 """
 
 from __future__ import annotations
 
+import argparse
 import ipaddress
 import json
 import socket
-import subprocess
 import sys
 from dataclasses import asdict, dataclass
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from mac_vendor_lookup import MacLookup
-from scapy.all import ARP, Ether, srp
+from scapy.all import ARP, Ether, conf, get_working_ifaces, srp
 
 
 @dataclass
@@ -33,52 +40,45 @@ class Device:
     hostname: Optional[str] = None
 
 
-def get_local_subnet() -> str:
+def get_default_iface_and_subnet() -> Tuple[str, str]:
     """
-    Best-effort detection of the local IPv4 subnet in CIDR form,
-    e.g. '192.168.1.0/24'. Tries the OS routing table first, then
-    falls back to guessing a /24 around the machine's own IP.
+    Returns (iface, subnet_cidr) for whichever interface the OS would
+    use to reach the internet. This is also the interface the ARP
+    broadcast needs to go out on -- if it doesn't match your real LAN
+    adapter, the scan will only ever find your own machine.
     """
-    try:
-        if sys.platform.startswith("linux"):
-            out = subprocess.check_output(["ip", "-4", "route", "show"], text=True)
-            for line in out.splitlines():
-                if line.startswith("default"):
-                    continue
-                first_field = line.split()[0]
-                if "/" in first_field:
-                    return first_field
-    except Exception:
-        pass
-
-    # Fallback for macOS/Windows, or if the above didn't find anything:
-    # guess a /24 around this machine's own address.
-    try:
-        # Doesn't actually send packets (UDP/connect trick), just asks the
-        # OS routing table which local interface would be used.
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-            s.connect(("8.8.8.8", 80))
-            local_ip = s.getsockname()[0]
-    except Exception:
-        local_ip = socket.gethostbyname(socket.gethostname())
-
-    network = ipaddress.ip_network(f"{local_ip}/24", strict=False)
-    return str(network)
+    iface, my_ip, _gateway_ip = conf.route.route("0.0.0.0")
+    network = ipaddress.ip_network(f"{my_ip}/24", strict=False)
+    return iface, str(network)
 
 
-def scan(subnet: Optional[str] = None, timeout: int = 3) -> List[Device]:
+def list_interfaces() -> None:
+    """Prints every interface scapy can see, to help pick one manually
+    if auto-detection picks the wrong adapter."""
+    for iface in get_working_ifaces():
+        print(f"  {iface.name!r:35} ip={iface.ip}")
+
+
+def scan(
+    subnet: Optional[str] = None,
+    iface: Optional[str] = None,
+    timeout: int = 3,
+) -> List[Device]:
     """
-    ARP-scans the given subnet (CIDR string, e.g. '192.168.1.0/24') and
-    returns a list of Device objects for everything that answered.
-    Auto-detects the subnet if none is given.
+    ARP-scans the given subnet (CIDR string, e.g. '192.168.1.0/24') on
+    the given interface, and returns a list of Device objects for
+    everything that answered. Auto-detects both if not given.
     """
-    subnet = subnet or get_local_subnet()
+    if subnet is None or iface is None:
+        detected_iface, detected_subnet = get_default_iface_and_subnet()
+        subnet = subnet or detected_subnet
+        iface = iface or detected_iface
 
     arp_request = ARP(pdst=subnet)
     broadcast = Ether(dst="ff:ff:ff:ff:ff:ff")
     packet = broadcast / arp_request
 
-    answered, _ = srp(packet, timeout=timeout, verbose=False)
+    answered, _ = srp(packet, timeout=timeout, iface=iface, verbose=False)
 
     devices = [Device(ip=received.psrc, mac=received.hwsrc) for _, received in answered]
     _enrich(devices)
@@ -104,11 +104,29 @@ def _enrich(devices: List[Device]) -> None:
             device.hostname = None
 
 
-def scan_to_json(subnet: Optional[str] = None) -> str:
-    devices = scan(subnet)
+def scan_to_json(subnet: Optional[str] = None, iface: Optional[str] = None) -> str:
+    devices = scan(subnet, iface)
     return json.dumps([asdict(d) for d in devices], indent=2)
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Scan the local network for connected devices.")
+    parser.add_argument("--subnet", help="CIDR subnet to scan, e.g. 192.168.1.0/24 (auto-detected if omitted)")
+    parser.add_argument("--iface", help="Network interface to scan on (auto-detected if omitted)")
+    parser.add_argument(
+        "--list-ifaces", action="store_true",
+        help="List available network interfaces and exit (use this if the scan only finds your own machine)",
+    )
+    parser.add_argument(
+        "--timeout", type=int, default=3,
+        help="Seconds to wait for ARP replies (default: 3, try higher if a known device is missing)",
+    )
+    args = parser.parse_args()
+
+    if args.list_ifaces:
+        list_interfaces()
+        sys.exit(0)
+
     print("Scanning local subnet for devices (requires root/admin privileges)...", file=sys.stderr)
-    print(scan_to_json())
+    devices = scan(subnet=args.subnet, iface=args.iface, timeout=args.timeout)
+    print(json.dumps([asdict(d) for d in devices], indent=2))
