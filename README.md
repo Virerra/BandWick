@@ -62,6 +62,8 @@ This prints JSON, one entry per device found:
 
 `vendor` and `hostname` can come back `null` if the lookup fails. This happens often with MAC randomization on modern phones or devices with no reverse DNS entry, and it isn't a bug.
 
+If the scan only finds your own machine, run `python discovery.py --list-ifaces` to see every network adapter it can detect and pass the correct one manually with `--iface`. This usually happens on machines with more than one adapter, like a VPN client or a virtual switch, where the wrong one gets picked automatically.
+
 ### ARP spoofing and interception
 
 Find your gateway IP first (`ip route` on Linux, `route -n get default` on macOS, `ipconfig` on Windows), then pick a target IP from the discovery output above.

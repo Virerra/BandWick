@@ -16,6 +16,14 @@ guess isn't always the one actually connected to your LAN. This module
 resolves the interface the same way the OS would for a normal internet
 connection, and sends the ARP broadcast explicitly on that interface,
 rather than leaving it to scapy's default.
+
+It also runs a quick ICMP ping sweep before the ARP sweep. Some
+devices in WiFi power-saving mode don't bother answering a broadcast
+"who has" ARP request, since the access point only delivers broadcast
+frames to sleeping clients at fixed beacon intervals, but they do wake
+up for a ping addressed directly to them. Anything that answers a ping
+but got missed by the ARP broadcast gets one more direct, targeted ARP
+request before being given up on.
 """
 
 from __future__ import annotations
@@ -29,7 +37,7 @@ from dataclasses import asdict, dataclass
 from typing import List, Optional, Tuple
 
 from mac_vendor_lookup import MacLookup
-from scapy.all import ARP, Ether, conf, get_working_ifaces, srp
+from scapy.all import ARP, ICMP, IP, Ether, conf, get_working_ifaces, sr, srp, srp1
 
 
 @dataclass
@@ -59,6 +67,33 @@ def list_interfaces() -> None:
         print(f"  {iface.name!r:35} ip={iface.ip}")
 
 
+def ping_sweep(subnet: str, timeout: float = 2) -> List[str]:
+    """
+    Sends an ICMP echo request to every host in the subnet at once and
+    returns the IPs that answered. Catches devices that ignore a
+    broadcast ARP request but still respond to a request addressed
+    directly to them -- and tends to wake a device up enough that a
+    follow-up direct ARP request succeeds too.
+    """
+    network = ipaddress.ip_network(subnet, strict=False)
+    hosts = [str(ip) for ip in network.hosts()]
+    try:
+        answered, _ = sr(IP(dst=hosts) / ICMP(), timeout=timeout, verbose=False)
+    except Exception:
+        # ICMP can be filtered on some networks -- the ARP sweep in scan()
+        # still runs regardless, this is purely a supplementary catch-all.
+        return []
+    return [received.src for _, received in answered]
+
+
+def get_mac(ip: str, timeout: float = 2) -> Optional[str]:
+    """Resolves a single IP's MAC via one direct, targeted ARP request."""
+    answer = srp1(
+        Ether(dst="ff:ff:ff:ff:ff:ff") / ARP(pdst=ip), timeout=timeout, verbose=False
+    )
+    return answer.hwsrc if answer else None
+
+
 def scan(
     subnet: Optional[str] = None,
     iface: Optional[str] = None,
@@ -67,20 +102,30 @@ def scan(
     """
     ARP-scans the given subnet (CIDR string, e.g. '192.168.1.0/24') on
     the given interface, and returns a list of Device objects for
-    everything that answered. Auto-detects both if not given.
+    everything that answered. Auto-detects subnet and interface if not
+    given, and backstops the broadcast ARP sweep with a ping sweep for
+    devices that only respond to traffic addressed directly to them.
     """
     if subnet is None or iface is None:
         detected_iface, detected_subnet = get_default_iface_and_subnet()
         subnet = subnet or detected_subnet
         iface = iface or detected_iface
 
+    responsive_ips = set(ping_sweep(subnet, timeout=min(timeout, 2)))
+
     arp_request = ARP(pdst=subnet)
     broadcast = Ether(dst="ff:ff:ff:ff:ff:ff")
-    packet = broadcast / arp_request
+    answered, _ = srp(broadcast / arp_request, timeout=timeout, iface=iface, verbose=False)
+    found = {received.psrc: received.hwsrc for _, received in answered}
 
-    answered, _ = srp(packet, timeout=timeout, iface=iface, verbose=False)
+    # Anything that answered a ping but was missed by the broadcast ARP
+    # sweep gets one more shot, addressed only to it.
+    for ip in responsive_ips - found.keys():
+        mac = get_mac(ip, timeout=timeout)
+        if mac:
+            found[ip] = mac
 
-    devices = [Device(ip=received.psrc, mac=received.hwsrc) for _, received in answered]
+    devices = [Device(ip=ip, mac=mac) for ip, mac in found.items()]
     _enrich(devices)
     return devices
 
