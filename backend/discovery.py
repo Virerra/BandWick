@@ -24,6 +24,12 @@ frames to sleeping clients at fixed beacon intervals, but they do wake
 up for a ping addressed directly to them. Anything that answers a ping
 but got missed by the ARP broadcast gets one more direct, targeted ARP
 request before being given up on.
+
+By default this probes all 254 possible addresses in the /24, since
+there's no general way to know a router's DHCP pool ahead of time. If
+you already know your router only ever hands out addresses in a
+narrower range, --host-range trims the sweep to just that range, which
+noticeably speeds things up.
 """
 
 from __future__ import annotations
@@ -31,6 +37,7 @@ from __future__ import annotations
 import argparse
 import ipaddress
 import json
+import logging
 import socket
 import sys
 from dataclasses import asdict, dataclass
@@ -38,6 +45,13 @@ from typing import List, Optional, Tuple
 
 from mac_vendor_lookup import MacLookup
 from scapy.all import ARP, ICMP, IP, Ether, conf, get_working_ifaces, sr, srp, srp1
+
+# The sweep below can hit every address in the subnet, most of which have no
+# device behind them. For each of those, scapy logs a "MAC address to reach
+# destination not found, using broadcast" warning -- harmless, since it still
+# delivers the packet, but noisy across a couple hundred addresses. Quieting
+# it down to errors only.
+logging.getLogger("scapy.runtime").setLevel(logging.ERROR)
 
 
 @dataclass
@@ -67,16 +81,31 @@ def list_interfaces() -> None:
         print(f"  {iface.name!r:35} ip={iface.ip}")
 
 
-def ping_sweep(subnet: str, timeout: float = 2) -> List[str]:
+def build_host_list(subnet: str, host_range: Optional[Tuple[int, int]] = None) -> List[str]:
     """
-    Sends an ICMP echo request to every host in the subnet at once and
-    returns the IPs that answered. Catches devices that ignore a
-    broadcast ARP request but still respond to a request addressed
-    directly to them -- and tends to wake a device up enough that a
-    follow-up direct ARP request succeeds too.
+    Builds the list of host IPs to probe within `subnet`. If `host_range`
+    is given as (start, end), only addresses whose last octet falls in
+    that inclusive range are included. Devices outside a narrowed range
+    (including the gateway itself, if it's outside the range you give)
+    won't show up -- this is a speed/coverage tradeoff you're opting into,
+    not the safe default.
     """
     network = ipaddress.ip_network(subnet, strict=False)
-    hosts = [str(ip) for ip in network.hosts()]
+    hosts = network.hosts()
+    if host_range is not None:
+        start, end = host_range
+        hosts = (ip for ip in hosts if start <= int(str(ip).split(".")[-1]) <= end)
+    return [str(ip) for ip in hosts]
+
+
+def ping_sweep(hosts: List[str], timeout: float = 3) -> List[str]:
+    """
+    Sends an ICMP echo request to every address in `hosts` at once and
+    returns the ones that answered. Catches devices that ignore a
+    broadcast ARP request but still respond to a request addressed
+    directly to them, and tends to wake a device up enough that a
+    follow-up direct ARP request succeeds too.
+    """
     try:
         answered, _ = sr(IP(dst=hosts) / ICMP(), timeout=timeout, verbose=False)
     except Exception:
@@ -98,6 +127,7 @@ def scan(
     subnet: Optional[str] = None,
     iface: Optional[str] = None,
     timeout: int = 3,
+    host_range: Optional[Tuple[int, int]] = None,
 ) -> List[Device]:
     """
     ARP-scans the given subnet (CIDR string, e.g. '192.168.1.0/24') on
@@ -111,9 +141,11 @@ def scan(
         subnet = subnet or detected_subnet
         iface = iface or detected_iface
 
-    responsive_ips = set(ping_sweep(subnet, timeout=min(timeout, 2)))
+    hosts = build_host_list(subnet, host_range)
 
-    arp_request = ARP(pdst=subnet)
+    responsive_ips = set(ping_sweep(hosts, timeout=timeout))
+
+    arp_request = ARP(pdst=hosts)
     broadcast = Ether(dst="ff:ff:ff:ff:ff:ff")
     answered, _ = srp(broadcast / arp_request, timeout=timeout, iface=iface, verbose=False)
     found = {received.psrc: received.hwsrc for _, received in answered}
@@ -164,7 +196,13 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--timeout", type=int, default=3,
-        help="Seconds to wait for ARP replies (default: 3, try higher if a known device is missing)",
+        help="Seconds to wait for replies, applies to both the ping and ARP sweeps (default: 3, try higher if a known device is missing)",
+    )
+    parser.add_argument(
+        "--host-range", nargs=2, type=int, metavar=("START", "END"),
+        help="Only scan addresses whose last number falls in this range, e.g. --host-range 100 150. "
+             "Speeds up the scan a lot if you know your router's DHCP pool, but anything outside "
+             "the range (including the gateway, if it's outside it) won't show up.",
     )
     args = parser.parse_args()
 
@@ -172,6 +210,8 @@ if __name__ == "__main__":
         list_interfaces()
         sys.exit(0)
 
+    host_range = tuple(args.host_range) if args.host_range else None
+
     print("Scanning local subnet for devices (requires root/admin privileges)...", file=sys.stderr)
-    devices = scan(subnet=args.subnet, iface=args.iface, timeout=args.timeout)
+    devices = scan(subnet=args.subnet, iface=args.iface, timeout=args.timeout, host_range=host_range)
     print(json.dumps([asdict(d) for d in devices], indent=2))

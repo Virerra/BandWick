@@ -64,6 +64,8 @@ This prints JSON, one entry per device found:
 
 If the scan only finds your own machine, run `python discovery.py --list-ifaces` to see every network adapter it can detect and pass the correct one manually with `--iface`. This usually happens on machines with more than one adapter, like a VPN client or a virtual switch, where the wrong one gets picked automatically.
 
+By default the scan checks all 254 possible addresses in the subnet, since there's no general way to know a router's DHCP pool ahead of time. If you already know your router only hands out addresses in a narrow range, `--host-range 100 150` limits the scan to that range and finishes noticeably faster. Anything outside the range you give won't show up, so only use this once you're sure of the range.
+
 ### ARP spoofing and interception
 
 Find your gateway IP first (`ip route` on Linux, `route -n get default` on macOS, `ipconfig` on Windows), then pick a target IP from the discovery output above.
